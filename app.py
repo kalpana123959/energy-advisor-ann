@@ -1,5 +1,5 @@
 """
-Member 3 prototype: Personalized Advice and Application.
+Adaptive Personalized Energy Advisor: Streamlit application.
 
 Original files (CSVs and sc_project.ipynb) are only read, never changed.
 """
@@ -41,23 +41,45 @@ DAY_NAMES = [
 ]
 
 
-@st.cache_resource(show_spinner="Loading preprocessing and ANN (same settings as the notebook)...")
+@st.cache_resource(show_spinner="Loading preprocessing and ANN...")
 def load_or_train_model():
+    """Load the saved ANN. If the saved files are missing or were created with a
+    different scikit-learn version (a common reason the app fails to open),
+    retrain automatically and save fresh files."""
     model_path = ARTIFACT_DIR / "ann_model.joblib"
     scaler_path = ARTIFACT_DIR / "scaler.joblib"
     metrics_path = ARTIFACT_DIR / "metrics.json"
 
-    if model_path.exists() and scaler_path.exists() and metrics_path.exists():
-        model = joblib.load(model_path)
-        scaler = joblib.load(scaler_path)
-        with open(metrics_path, encoding="utf-8") as f:
-            metrics = json.load(f)
-        return model, scaler, metrics
+    try:
+        if model_path.exists() and scaler_path.exists() and metrics_path.exists():
+            model = joblib.load(model_path)
+            scaler = joblib.load(scaler_path)
+            with open(metrics_path, encoding="utf-8") as f:
+                metrics = json.load(f)
+            import sklearn
+            if metrics.get("sklearn_version") != sklearn.__version__:
+                raise RuntimeError("Saved model was built with a different scikit-learn version")
+            # quick sanity check that the loaded objects really work
+            model.predict(scaler.transform(pd.DataFrame([[1.0] * len(FEATURES)], columns=FEATURES)))
+            return model, scaler, metrics
+    except Exception:
+        pass  # fall through and retrain
 
     metrics = train_and_save()
     model = joblib.load(model_path)
     scaler = joblib.load(scaler_path)
     return model, scaler, metrics
+
+
+@st.cache_data
+def load_hourly_data():
+    """Full hourly dataset with timestamps, used for the weekly report."""
+    path = BASE_DIR / "prepared_hourly_data.csv"
+    df = pd.read_csv(path, parse_dates=["datetime"])
+    for col in FEATURES + [TARGET]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=FEATURES + [TARGET]).reset_index(drop=True)
+    return df
 
 
 @st.cache_data
@@ -230,6 +252,301 @@ def plot_nearby_hours(samples, center_index, model, scaler):
     return fig
 
 
+def build_weekly_report(df, week_start, model, scaler):
+    """Summarise one Monday-to-Sunday week and compare it with the previous week."""
+    week_start = pd.Timestamp(week_start)
+    week_end = week_start + pd.Timedelta(days=7)
+    cur = df[(df["datetime"] >= week_start) & (df["datetime"] < week_end)].copy()
+    prev = df[
+        (df["datetime"] >= week_start - pd.Timedelta(days=7))
+        & (df["datetime"] < week_start)
+    ].copy()
+    if cur.empty:
+        return None
+
+    # Global_active_power is the hourly average in kW, so each row is about 1 kWh per kW.
+    cur["kwh"] = cur["Global_active_power"]
+    cur["date"] = cur["datetime"].dt.date
+    daily = cur.groupby("date")["kwh"].sum()
+    hourly_profile = cur.groupby("hour")["kwh"].mean()
+
+    total = float(cur["kwh"].sum())
+    prev_total = float(prev["Global_active_power"].sum()) if len(prev) else None
+    change_pct = (
+        100.0 * (total - prev_total) / prev_total if prev_total and prev_total > 0 else None
+    )
+
+    sm_cols = ["Sub_metering_1", "Sub_metering_2", "Sub_metering_3"]
+    sm_totals = cur[sm_cols].sum()
+    sm_sum = float(sm_totals.sum())
+    sm_share = (sm_totals / sm_sum * 100.0) if sm_sum > 0 else sm_totals * 0.0
+
+    evening = cur[(cur["hour"] >= 17) & (cur["hour"] <= 22)]["kwh"].sum()
+    night = cur[cur["hour"] <= 6]["kwh"].sum()
+
+    scaled = scaler.transform(cur[FEATURES])
+    cur["ann_pred"] = np.maximum(model.predict(scaled), 0.0)
+    mae = float(np.mean(np.abs(cur["ann_pred"] - cur[TARGET])))
+
+    weekday_mask = cur["day_of_week"] < 5
+    weekday_avg = float(cur.loc[weekday_mask, "kwh"].mean()) if weekday_mask.any() else 0.0
+    weekend_avg = float(cur.loc[~weekday_mask, "kwh"].mean()) if (~weekday_mask).any() else 0.0
+
+    return {
+        "data": cur,
+        "daily": daily,
+        "hourly_profile": hourly_profile,
+        "total": total,
+        "prev_total": prev_total,
+        "change_pct": change_pct,
+        "avg_hourly": float(cur["kwh"].mean()),
+        "peak_hour": int(hourly_profile.idxmax()),
+        "peak_value": float(hourly_profile.max()),
+        "highest_day": daily.idxmax(),
+        "highest_day_kwh": float(daily.max()),
+        "lowest_day": daily.idxmin(),
+        "lowest_day_kwh": float(daily.min()),
+        "sm_share": sm_share,
+        "evening_share": float(100.0 * evening / total) if total > 0 else 0.0,
+        "night_share": float(100.0 * night / total) if total > 0 else 0.0,
+        "ann_mae": mae,
+        "weekday_avg": weekday_avg,
+        "weekend_avg": weekend_avg,
+        "hours_covered": int(len(cur)),
+    }
+
+
+def weekly_recommendations(rep):
+    tips = []
+    if rep["change_pct"] is not None:
+        if rep["change_pct"] > 10:
+            tips.append(
+                f"Consumption rose {rep['change_pct']:.1f}% compared with last week. "
+                "Review which appliances were used more often."
+            )
+        elif rep["change_pct"] < -10:
+            tips.append(
+                f"Well done: consumption fell {abs(rep['change_pct']):.1f}% compared with last week. "
+                "Keep up the same habits."
+            )
+        else:
+            tips.append("Weekly consumption is stable compared with last week.")
+
+    if rep["evening_share"] > 40:
+        tips.append(
+            f"{rep['evening_share']:.0f}% of this week's energy was used between 5 pm and 10 pm. "
+            "Spread heavy appliances (washing machine, oven, water heater) across the day."
+        )
+    if rep["night_share"] > 25:
+        tips.append(
+            f"{rep['night_share']:.0f}% of energy was used between midnight and 6 am. "
+            "Check for devices left running overnight (standby loads)."
+        )
+
+    names = {
+        "Sub_metering_1": "kitchen",
+        "Sub_metering_2": "laundry",
+        "Sub_metering_3": "water heater / AC",
+    }
+    top = rep["sm_share"].idxmax()
+    if rep["sm_share"][top] > 0:
+        tips.append(
+            f"The {names[top]} circuit had the largest share of sub-metered energy "
+            f"({rep['sm_share'][top]:.0f}%). Start your savings there."
+        )
+
+    if rep["weekend_avg"] > rep["weekday_avg"] * 1.15:
+        tips.append("Weekends use noticeably more power than weekdays. Plan chores to avoid overlapping loads.")
+    elif rep["weekday_avg"] > rep["weekend_avg"] * 1.15:
+        tips.append("Weekday usage is higher than weekends. Check what runs while the house is empty.")
+
+    if not tips:
+        tips.append("Usage looks balanced this week. Continue switching off idle devices.")
+    return tips
+
+
+def plot_daily_totals(daily):
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    labels = [pd.Timestamp(d).strftime("%a %d %b") for d in daily.index]
+    ax.bar(labels, daily.values, color="#5b8def")
+    ax.set_ylabel("Energy used (kWh)")
+    ax.set_title("Daily consumption this week")
+    ax.grid(axis="y", alpha=0.3)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    return fig
+
+
+def plot_hourly_profile(profile):
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    ax.plot(profile.index, profile.values, marker="o", color="#2bb673")
+    ax.axvspan(17, 22, color="#f4a261", alpha=0.2, label="Evening peak (5-10 pm)")
+    ax.set_xlabel("Hour of day")
+    ax.set_ylabel("Average power (kW)")
+    ax.set_title("Typical day this week")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_week_actual_vs_pred(data):
+    fig, ax = plt.subplots(figsize=(10, 3.8))
+    ax.plot(data["datetime"], data[TARGET], label="Actual next hour", linewidth=1.2)
+    ax.plot(data["datetime"], data["ann_pred"], label="ANN prediction", linewidth=1.2, alpha=0.85)
+    ax.set_ylabel("Electricity consumption (kW)")
+    ax.set_title("Actual vs ANN prediction for the week")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    return fig
+
+
+def plot_submeter_share(share):
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    ax.bar(
+        ["Kitchen", "Laundry", "Water heater / AC"],
+        share.values,
+        color=["#e76f51", "#2a9d8f", "#264653"],
+    )
+    ax.set_ylabel("Share of sub-metered energy (%)")
+    ax.set_title("Where the sub-metered energy went")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def render_weekly_report(model, scaler):
+    st.subheader("Weekly electricity report")
+    st.caption(
+        "Pick a week from the held-out test period (data the ANN did not train on). "
+        "Weeks run Monday to Sunday."
+    )
+    df = load_hourly_data()
+    split_time = df["datetime"].iloc[int(len(df) * 0.80)]
+    test_df = df[df["datetime"] >= split_time]
+    mondays = sorted(
+        {
+            (t - pd.Timedelta(days=int(t.dayofweek))).normalize()
+            for t in test_df["datetime"]
+        }
+    )
+    # keep only weeks with enough data (at least 5 full days of hours)
+    mondays = [
+        m for m in mondays
+        if len(df[(df["datetime"] >= m) & (df["datetime"] < m + pd.Timedelta(days=7))]) >= 120
+    ]
+    if not mondays:
+        st.warning("Not enough data to build a weekly report.")
+        return
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        week_start = st.selectbox(
+            "Select week",
+            options=mondays,
+            index=len(mondays) - 1,
+            format_func=lambda m: f"{m:%d %b %Y} to {(m + pd.Timedelta(days=6)):%d %b %Y}",
+        )
+    with c2:
+        tariff = st.number_input(
+            "Electricity price (per kWh)",
+            min_value=0.0,
+            value=7.0,
+            step=0.5,
+            help="Used only for the cost estimate. Enter your own tariff.",
+        )
+
+    rep = build_weekly_report(df, week_start, model, scaler)
+    if rep is None:
+        st.warning("No data for this week.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    delta = None if rep["change_pct"] is None else f"{rep['change_pct']:+.1f}% vs last week"
+    k1.metric("Total energy (kWh)", f"{rep['total']:.1f}", delta=delta, delta_color="inverse")
+    k2.metric("Estimated cost", f"{rep['total'] * tariff:,.0f}")
+    k3.metric("Average per hour (kW)", f"{rep['avg_hourly']:.2f}")
+    k4.metric("Peak hour", f"{rep['peak_hour']:02d}:00", help=f"Average {rep['peak_value']:.2f} kW")
+
+    d1, d2 = st.columns(2)
+    d1.write(
+        f"**Highest day:** {pd.Timestamp(rep['highest_day']):%A %d %b} "
+        f"({rep['highest_day_kwh']:.1f} kWh)"
+    )
+    d2.write(
+        f"**Lowest day:** {pd.Timestamp(rep['lowest_day']):%A %d %b} "
+        f"({rep['lowest_day_kwh']:.1f} kWh)"
+    )
+    if rep["hours_covered"] < 168:
+        st.caption(f"Note: this week has {rep['hours_covered']} of 168 hourly readings, so totals are partial.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        fig = plot_daily_totals(rep["daily"])
+        st.pyplot(fig)
+        plt.close(fig)
+    with g2:
+        fig = plot_hourly_profile(rep["hourly_profile"])
+        st.pyplot(fig)
+        plt.close(fig)
+
+    g3, g4 = st.columns(2)
+    with g3:
+        fig = plot_submeter_share(rep["sm_share"])
+        st.pyplot(fig)
+        plt.close(fig)
+    with g4:
+        st.write("**Usage split**")
+        st.write(f"- Evening peak (5-10 pm): **{rep['evening_share']:.0f}%** of the week's energy")
+        st.write(f"- Night (12-6 am): **{rep['night_share']:.0f}%**")
+        st.write(f"- Weekday average: **{rep['weekday_avg']:.2f} kW**")
+        st.write(f"- Weekend average: **{rep['weekend_avg']:.2f} kW**")
+        st.write(f"- ANN error this week (MAE): **{rep['ann_mae']:.3f} kW**")
+
+    fig = plot_week_actual_vs_pred(rep["data"])
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.subheader("Weekly energy-saving suggestions")
+    for tip in weekly_recommendations(rep):
+        st.write(f"- {tip}")
+
+    st.subheader("Estimated savings (illustrative)")
+    pct = st.slider("If you cut evening-peak usage by (%)", 0, 30, 10)
+    saved_kwh = rep["total"] * rep["evening_share"] / 100.0 * pct / 100.0
+    s1, s2 = st.columns(2)
+    s1.metric("Energy saved per week (kWh)", f"{saved_kwh:.1f}")
+    s2.metric("Cost saved per week", f"{saved_kwh * tariff:,.0f}")
+    st.caption("This is a what-if estimate from your own usage pattern, not a measured result.")
+
+    report_df = pd.DataFrame(
+        {
+            "Metric": [
+                "Week start", "Total kWh", "Previous week kWh", "Change vs last week (%)",
+                "Average kW per hour", "Peak hour", "Highest day", "Lowest day",
+                "Evening share (%)", "Night share (%)", "ANN MAE (kW)",
+            ],
+            "Value": [
+                f"{pd.Timestamp(week_start):%Y-%m-%d}", f"{rep['total']:.2f}",
+                "n/a" if rep["prev_total"] is None else f"{rep['prev_total']:.2f}",
+                "n/a" if rep["change_pct"] is None else f"{rep['change_pct']:.1f}",
+                f"{rep['avg_hourly']:.3f}", f"{rep['peak_hour']:02d}:00",
+                f"{pd.Timestamp(rep['highest_day']):%Y-%m-%d}",
+                f"{pd.Timestamp(rep['lowest_day']):%Y-%m-%d}",
+                f"{rep['evening_share']:.1f}", f"{rep['night_share']:.1f}", f"{rep['ann_mae']:.3f}",
+            ],
+        }
+    )
+    st.download_button(
+        "Download weekly report (CSV)",
+        report_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"weekly_report_{pd.Timestamp(week_start):%Y-%m-%d}.csv",
+        mime="text/csv",
+    )
+
+
 def main():
     st.set_page_config(
         page_title="Adaptive Personalized Energy Advisor",
@@ -238,7 +555,7 @@ def main():
     )
     st.title("Adaptive Personalized Energy Advisor")
     st.caption(
-        "Member 3 prototype: next-hour ANN prediction, consumption graphs, "
+        "ANN-based next-hour prediction, consumption graphs, weekly reports "
         "and personalized energy-saving advice."
     )
 
@@ -289,7 +606,7 @@ def main():
                 f"R² **{metrics['ann']['R2']:.4f}**"
             )
 
-    tab_predict, tab_docs = st.tabs(["Advisor app", "Prototype notes"])
+    tab_predict, tab_weekly, tab_docs = st.tabs(["Advisor app", "Weekly report", "About"])
 
     with tab_predict:
         st.subheader("1. Current-hour household inputs")
@@ -467,6 +784,9 @@ def main():
                 for reason in reasons:
                     st.write(f"- {reason}")
 
+    with tab_weekly:
+        render_weekly_report(model, scaler)
+
     with tab_docs:
         st.markdown(
             """
@@ -474,16 +794,16 @@ def main():
 
 1. Reads your prepared hourly data (original files are not changed).
 2. Applies the notebook preprocessing: keep 9 features, convert to numbers, drop invalid rows, scale with `StandardScaler`.
-3. Uses the same ANN as Member 2: `MLPRegressor` with hidden layers (64, 32), ReLU, Adam, 50 iterations.
+3. Uses an ANN (`MLPRegressor`) with hidden layers (64, 32), ReLU, Adam, 50 iterations.
 4. Predicts `target_next_hour` (next-hour electricity consumption).
 5. Shows graphs and personalized tips from the prediction and household features.
 
-**Files that are new (safe to submit with the prototype)**
+**Project files**
 
 - `app.py` — Streamlit user interface
 - `train_model.py` — trains/saves the ANN without editing original CSVs
 - `requirements.txt` — Python packages
-- `artifacts/` — created after the first run (`ann_model.joblib`, `scaler.joblib`, `metrics.json`)
+- `artifacts/` — saved model files, recreated automatically if missing or incompatible (`ann_model.joblib`, `scaler.joblib`, `metrics.json`)
 
 **How to run**
 

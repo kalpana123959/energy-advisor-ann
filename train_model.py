@@ -10,6 +10,7 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
+import sklearn
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
@@ -72,7 +73,7 @@ def train_and_save():
         max_iter=50,
         early_stopping=False,
         random_state=42,
-        verbose=True,
+        verbose=False,
     )
     ann.fit(X_train_scaled, y_train)
 
@@ -91,6 +92,7 @@ def train_and_save():
     joblib.dump(scaler, ARTIFACT_DIR / "scaler.joblib")
 
     metrics = {
+        "sklearn_version": sklearn.__version__,
         "source": "Computed by train_model.py using the same ANN and split as sc_project.ipynb",
         "n_train": int(len(X_train)),
         "n_test": int(len(X_test)),
