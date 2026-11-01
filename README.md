@@ -1,14 +1,13 @@
-# Adaptive Personalized Energy Advisor
+# Adaptive Personalized Energy Advisor (multi-page)
 
-Run locally (Windows): double-click `run_app.bat`
-or in a terminal inside this folder:
+Run (Windows): double-click `run_app.bat`, or in a terminal inside this folder:
 
     pip install -r requirements.txt
     python -m streamlit run app.py
 
-If the app does not open:
-- Use `python -m streamlit run app.py` (plain `streamlit` may not be on PATH).
-- If the saved model came from a different scikit-learn version, the app retrains automatically (about a minute) and saves fresh files in `artifacts/`.
-- Keep all CSV files in the same folder as `app.py`.
+Pages (folder `views/`): Dashboard, Energy Analytics, Weekly Report, Personalized Advice,
+Energy Calculator, Energy Prediction, Adaptive Learning, Settings.
 
-Tabs: Advisor app (next-hour prediction, graphs, tips), Weekly report, About.
+Files: `app.py` (navigation) · `utils.py` (shared logic, reused from the old app) ·
+`train_model.py`, CSVs, `artifacts/` (unchanged) · `old_app.py` (your previous single-page app, kept as backup).
+Use the Energy Prediction page first, then open Personalized Advice.
