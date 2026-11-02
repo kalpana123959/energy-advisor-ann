@@ -1,13 +1,16 @@
-# Adaptive Personalized Energy Advisor (multi-page)
+# Adaptive Personalized Energy Advisor
 
-Run (Windows): double-click `run_app.bat`, or in a terminal inside this folder:
+How to run (Windows): double-click `run_app.bat`, or open a terminal in this folder and type:
 
     pip install -r requirements.txt
     python -m streamlit run app.py
 
-Pages (folder `views/`): Dashboard, Energy Analytics, Weekly Report, Personalized Advice,
-Energy Calculator, Energy Prediction, Adaptive Learning, Settings.
+How it works: Welcome page -> "Get Started" -> cards (2 per row) -> a section. Inside a section, the "All sections" side panel switches pages and the Home button returns to the start.
 
-Files: `app.py` (navigation) · `utils.py` (shared logic, reused from the old app) ·
-`train_model.py`, CSVs, `artifacts/` (unchanged) · `old_app.py` (your previous single-page app, kept as backup).
-Use the Energy Prediction page first, then open Personalized Advice.
+Files
+- app.py        : welcome page, card menu and page switching (no default sidebar menu)
+- utils.py      : shared code (model loading, predictions, tips, charts, theme)
+- views/*.py    : the 8 sections (keep the file names as they are)
+- .streamlit/config.toml : light colour theme
+- train_model.py, CSV files, artifacts/, sc_project.ipynb : unchanged
+- old_app.py    : your earlier single-page app (backup)
