@@ -1,9 +1,9 @@
 import pandas as pd
 import streamlit as st
 from utils import (load_or_train_model, load_hourly_data, get_settings, page_header,
-                   split_index, SUBMETER_NAMES)
+                   pie_chart, line_chart, kpi_panel, SUBMETER_NAMES)
 
-page_header("Dashboard", "Overview of your household consumption and the ANN model")
+page_header("Dashboard", "A quick summary of your power use and how well the model works")
 model, scaler, metrics = load_or_train_model()
 df = load_hourly_data()
 s = get_settings()
@@ -14,40 +14,52 @@ prev30 = df[(df["datetime"] >= latest_day - pd.Timedelta(days=60)) &
             (df["datetime"] < latest_day - pd.Timedelta(days=30))]
 tot30 = last30["Global_active_power"].sum()
 tot_prev = prev30["Global_active_power"].sum()
-delta = None if tot_prev == 0 else f"{100 * (tot30 - tot_prev) / tot_prev:+.1f}% vs previous 30 days"
-
-st.caption(f"Data covers {df['datetime'].min():%d %b %Y} to {df['datetime'].max():%d %b %Y} "
-           f"({len(df):,} hourly readings). 'Last 30 days' means the final 30 days in the dataset.")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Energy, last 30 days (kWh)", f"{tot30:,.0f}", delta=delta, delta_color="inverse")
-c2.metric("Estimated cost", f"{s['currency']}{tot30 * s['tariff']:,.0f}")
-c3.metric("Average power (kW)", f"{last30['Global_active_power'].mean():.2f}")
+chg = None if tot_prev == 0 else 100 * (tot30 - tot_prev) / tot_prev
 hourly_avg = df.groupby("hour")["Global_active_power"].mean()
-c4.metric("Usual peak hour", f"{int(hourly_avg.idxmax()):02d}:00")
 
-st.subheader("ANN model performance (held-out test data)")
+st.caption(f"The data runs from {df['datetime'].min():%d %b %Y} to {df['datetime'].max():%d %b %Y} "
+           f"({len(df):,} hourly readings). \"Last 30 days\" means the final 30 days of this data.")
+
+kpi_panel([
+    {"label": "Power used, last 30 days (kWh)", "value": f"{tot30:,.0f}",
+     "delta": None if chg is None else f"{chg:+.1f}% vs the 30 days before", "delta_val": chg, "better": "lower"},
+    {"label": "Estimated cost", "value": f"{s['currency']}{tot30 * s['tariff']:,.0f}"},
+    {"label": "Average power (kW)", "value": f"{last30['Global_active_power'].mean():.2f}"},
+    {"label": "Busiest hour of the day", "value": f"{int(hourly_avg.idxmax()):02d}:00"},
+])
+
+st.subheader("How well does the model guess?")
 a, b = metrics["ann"], metrics["baseline"]
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("ANN MAE (kW)", f"{a['MAE']:.4f}", delta=f"{a['MAE'] - b['MAE']:.4f} vs baseline", delta_color="inverse")
-m2.metric("ANN RMSE (kW)", f"{a['RMSE']:.4f}", delta=f"{a['RMSE'] - b['RMSE']:.4f} vs baseline", delta_color="inverse")
-m3.metric("ANN R²", f"{a['R2']:.4f}", delta=f"{a['R2'] - b['R2']:+.4f} vs baseline")
-m4.metric("Test rows", f"{metrics['n_test']:,}")
-st.caption("Baseline = use this hour's power as the next-hour guess. These numbers come from "
-           "artifacts/metrics.json, computed by train_model.py on your real split.")
+kpi_panel([
+    {"label": "Average error (kW)", "value": f"{a['MAE']:.4f}", "delta": f"{a['MAE'] - b['MAE']:+.4f} vs simple guess",
+     "delta_val": a['MAE'] - b['MAE'], "better": "lower"},
+    {"label": "Typical error, RMSE (kW)", "value": f"{a['RMSE']:.4f}", "delta": f"{a['RMSE'] - b['RMSE']:+.4f} vs simple guess",
+     "delta_val": a['RMSE'] - b['RMSE'], "better": "lower"},
+    {"label": "Fit score, R²", "value": f"{a['R2']:.4f}", "delta": f"{a['R2'] - b['R2']:+.4f} vs simple guess",
+     "delta_val": a['R2'] - b['R2'], "better": "higher"},
+    {"label": "Hours used for testing", "value": f"{metrics['n_test']:,}"},
+])
+with st.expander("What do these numbers mean?"):
+    st.markdown("""
+- **Average error:** on average, the model's guess is off by this many kW. **Smaller is better.**
+- **Typical error (RMSE):** like the average error, but big mistakes count more. **Smaller is better.**
+- **Fit score (R²):** how closely the guess follows the real ups and downs. **Closer to 1 is better.**
+- **Simple guess:** just saying "next hour will be the same as this hour". The model should beat it.
+- These numbers were measured on hours the model had never seen before.
+""")
 
 left, right = st.columns([3, 2])
 with left:
-    st.subheader("Daily consumption – last 60 days of data")
+    st.subheader("Power used each day (last 60 days of data)")
     daily = (df[df["datetime"] >= latest_day - pd.Timedelta(days=60)]
              .groupby(df["datetime"].dt.date)["Global_active_power"].sum())
-    st.line_chart(daily.rename("kWh per day"))
+    line_chart(daily.rename("kWh per day"), ylabel="Power used (kWh)", xlabel="Date")
 with right:
-    st.subheader("Where sub-metered energy goes")
+    st.subheader("Where the power goes")
     share = last30[list(SUBMETER_NAMES)].sum()
     share.index = [SUBMETER_NAMES[i] for i in share.index]
-    st.bar_chart(share.rename("Sub-meter total (last 30 days)"))
-    st.caption("The rest of the household load is not covered by the three sub-meters.")
+    pie_chart(share.rename("Meter total"), title="Share of the three meters (last 30 days)")
+    st.caption("Only three parts of the house have their own meter. The rest is not shown here.")
 
-st.subheader("Average day profile")
-st.line_chart(hourly_avg.rename("Average kW by hour of day"))
+st.subheader("A typical day")
+line_chart(hourly_avg.rename("Average kW"), ylabel="Average power (kW)", xlabel="Hour of the day (0 = midnight)", fill=True)

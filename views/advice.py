@@ -1,41 +1,44 @@
 import streamlit as st
-from utils import (load_hourly_data, get_settings, page_header, make_recommendations, tip_html,
-                   consumption_level, level_badge, SUBMETER_NAMES)
+from utils import (go, load_hourly_data, get_settings, page_header, make_recommendations, tip_html,
+                   consumption_level, level_badge, kpi_panel, SUBMETER_NAMES)
 
-page_header("Personalized Advice", "Energy-saving tips built from the ANN prediction and your usage pattern")
+page_header("Personalized Advice", "Simple tips to save power, based on your prediction")
 df = load_hourly_data()
 s = get_settings()
 res = st.session_state.get("last_result")
 
 if not res:
-    st.info("No prediction yet. Open **Energy Prediction**, enter or load a row, and click "
-            "**Predict next hour**. The advice here is generated from that real ANN result.")
+    st.info("You have not made a prediction yet. Go to **Energy Prediction**, click **Predict next hour**, "
+            "and your tips will appear here.")
+    st.button("Go to Energy Prediction →", on_click=go, args=("prediction",), key="to_pred")
     st.stop()
 
 inputs, pred = res["inputs"], res["predicted"]
 level, lo, hi = consumption_level(pred, df, s)
-c1, c2, c3 = st.columns(3)
-c1.metric("Predicted next hour (kW)", f"{pred:.3f}")
-c2.markdown(f"**Predicted level**<br>{level_badge(level)}", unsafe_allow_html=True)
 sm = {k: inputs[k] for k in SUBMETER_NAMES}
 top = max(sm, key=sm.get)
-c3.metric("Largest sub-meter", SUBMETER_NAMES[top], help=f"Reading: {sm[top]:.2f}")
+kpi_panel([
+    {"label": "Guess for next hour (kW)", "value": f"{pred:.3f}"},
+    {"label": "Your level", "value": level_badge(level)},
+    {"label": "Meter using the most", "value": SUBMETER_NAMES[top], "help": f"Reading: {sm[top]:.2f}"},
+])
 
 tips, reasons = make_recommendations(inputs, pred)
 kind = {"High": "alert", "Medium": "warn", "Low": ""}[level]
-st.subheader("Recommended actions")
+st.subheader("What you can do")
 for t in tips:
     st.markdown(tip_html(t, kind), unsafe_allow_html=True)
 
-with st.expander("Why these tips were shown"):
+with st.expander("Why am I seeing these tips?"):
     for r in reasons:
         st.write(f"- {r}")
 
-st.subheader("Estimated saving if you follow the advice (what-if)")
-pct = st.slider("Assume you reduce the next hour's load by (%)", 0, 40, 10)
+st.subheader("How much could you save? (just an estimate)")
+pct = st.slider("Imagine you use this much less power in the next hour (%)", 0, 40, 10)
 saved = pred * pct / 100.0
-a, b = st.columns(2)
-a.metric("Energy saved this hour (kWh)", f"{saved:.3f}")
-b.metric("Cost saved this hour", f"{s['currency']}{saved * s['tariff']:.2f}")
-st.caption("This is an illustrative what-if from the prediction, not a measured saving. "
-           "Tips come from rules applied to the ANN output and your inputs.")
+kpi_panel([
+    {"label": "Power saved in this hour (kWh)", "value": f"{saved:.3f}"},
+    {"label": "Money saved in this hour", "value": f"{s['currency']}{saved * s['tariff']:.2f}"},
+])
+st.caption("This is only an estimate, not a measured saving. The tips come from simple rules "
+           "applied to your prediction and readings.")
