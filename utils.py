@@ -389,122 +389,76 @@ def go(route):
     st.session_state["route"] = route
 
 
-# ----------------------------------------------- readable charts (matplotlib) ---
-import math
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-
-CHART_COLORS = ["#5aa886", "#6fa8dc", "#e0b66a", "#c98f8f"]
-FIG_W, FIG_H = 5.8, 2.6      # compact size (inches)
+# ------------------------------------------------ charts (Streamlit's own style) ---
+CHART_H = 260
+PIE_COLORS = ["#5aa886", "#6fa8dc", "#e0b66a", "#c98f8f", "#9b8fc9", "#7fc4c4", "#c9b38f", "#aab4a0"]
 
 
-def _prep_axes(ax, title, xlabel, ylabel):
-    ax.set_title(title, fontsize=11, loc="left", color="#1f2937", pad=10)
-    if xlabel:
-        ax.set_xlabel(xlabel, fontsize=9, color="#374151")
-    if ylabel:
-        ax.set_ylabel(ylabel, fontsize=9, color="#374151")
-    ax.grid(axis="y", alpha=0.25)
-    ax.set_axisbelow(True)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    ax.tick_params(labelsize=8)
-
-
-def _show(fig):
-    fig.set_dpi(110)
-    fig.tight_layout(pad=1.0)
-    try:
-        st.pyplot(fig, width="content")          # keep the chart at its small size
-    except TypeError:
-        st.pyplot(fig, use_container_width=False)
-    plt.close(fig)
+def _native(fn, data, **kw):
+    """Call a Streamlit chart with optional extras; drop the extras on older versions."""
+    for attempt in (kw, {k: v for k, v in kw.items() if k in ("height",)}, {}):
+        try:
+            return fn(data, **attempt)
+        except TypeError:
+            continue
+    return fn(data)
 
 
 def bar_chart(data, title="", ylabel="", xlabel="", horizontal=None, height=None):
-    """Bar chart whose labels stay horizontal and readable.
-    Long names or many bars -> horizontal bars. Many number labels -> every 2nd/3rd label."""
-    fig_w = FIG_W
-    if isinstance(data, pd.DataFrame) and data.shape[1] > 1:
-        fig, ax = plt.subplots(figsize=(fig_w, height or FIG_H))
-        data.plot.bar(ax=ax, rot=0, color=CHART_COLORS[: data.shape[1]], width=0.7)
-        ax.legend(fontsize=8.5, frameon=False)
-        _prep_axes(ax, title, xlabel, ylabel)
-        _show(fig)
-        return
-    s = data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data
-    labels = [str(i) for i in s.index]
-    n = len(labels)
-    multiline = any("\n" in x for x in labels)
-    longest = max((len(p) for x in labels for p in x.split("\n")), default=0)
-    if horizontal is None:
-        est = sum(max(len(p) for p in x.split("\n")) for x in labels) * 0.085
-        horizontal = (not multiline) and longest > 5 and est > fig_w * 0.8
-    if horizontal:
-        fig, ax = plt.subplots(figsize=(fig_w, max(1.9, 0.3 * n + 1.0)))
-        ax.barh(labels, s.values, color=CHART_COLORS[0])
-        ax.invert_yaxis()
-        ax.grid(axis="x", alpha=0.25)
-        ax.set_axisbelow(True)
-        ax.set_title(title, fontsize=11, loc="left", color="#1f2937", pad=10)
-        ax.set_xlabel(ylabel, fontsize=9, color="#374151")
-        if xlabel:
-            ax.set_ylabel(xlabel, fontsize=9, color="#374151")
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        ax.tick_params(labelsize=8)
-        _show(fig)
-        return
-    fig, ax = plt.subplots(figsize=(fig_w, height or FIG_H))
-    pos = list(range(n))
-    ax.bar(pos, s.values, color=CHART_COLORS[0], width=0.7)
-    step = max(1, math.ceil(n / 12)) if longest <= 3 else 1
-    ax.set_xticks(pos[::step])
-    shown = labels[::step]
-    need_inches = sum(max(len(p) for p in x.split("\n")) for x in shown) * 0.085
-    if need_inches > fig_w * 0.8:       # still too crowded -> slight angle, never vertical
-        ax.set_xticklabels(shown, rotation=25, ha="right")
+    """Streamlit bar chart. Text labels use horizontal bars, so names are never sideways."""
+    if title:
+        st.markdown(f"**{title}**")
+    df_ = data.to_frame() if isinstance(data, pd.Series) else data
+    numeric_index = pd.api.types.is_numeric_dtype(df_.index)
+    horiz = (not numeric_index) if horizontal is None else horizontal
+    if horiz:
+        df_ = df_.copy()
+        df_.index = [str(i).replace("\n", " ") for i in df_.index]
+        _native(st.bar_chart, df_, horizontal=True, height=height or CHART_H)
     else:
-        ax.set_xticklabels(shown, rotation=0, ha="center")
-    _prep_axes(ax, title, xlabel, ylabel)
-    _show(fig)
+        _native(st.bar_chart, df_, height=height or CHART_H, x_label=xlabel or None, y_label=ylabel or None)
 
 
 def line_chart(data, title="", ylabel="", xlabel="", height=None, markers=False, fill=False):
-    """Line chart with tidy date or hour labels (horizontal, not crowded)."""
-    df_ = data.to_frame() if isinstance(data, pd.Series) else data.copy()
-    idx = df_.index
-    is_dates = False
-    if len(idx) and not pd.api.types.is_numeric_dtype(idx):
-        try:
-            df_.index = pd.to_datetime(idx)
-            is_dates = True
-        except Exception:
-            pass
-    fig, ax = plt.subplots(figsize=(FIG_W, height or FIG_H))
-    for i, col in enumerate(df_.columns):
-        ax.plot(df_.index, df_[col].values, label=str(col),
-                color=CHART_COLORS[i % len(CHART_COLORS)], linewidth=1.6,
-                marker="o" if markers else None, markersize=3.5)
-    if fill:
-        for i, col in enumerate(df_.columns):
-            ax.fill_between(df_.index, df_[col].values, alpha=0.22, color=CHART_COLORS[i % len(CHART_COLORS)])
-    if is_dates:
-        span = (df_.index.max() - df_.index.min()).days if len(df_) else 0
-        fmt = "%a %d %b" if span <= 10 else ("%d %b" if span <= 120 else ("%b %Y" if span <= 800 else "%Y"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=3, maxticks=6))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
-        for lab in ax.get_xticklabels():
-            lab.set_rotation(0)
-            lab.set_ha("center")
-    elif pd.api.types.is_numeric_dtype(idx) and len(idx) and idx.min() >= 0 and idx.max() <= 23 and len(idx) >= 20:
-        ax.set_xticks(range(0, 24, 2))
-    if df_.shape[1] > 1:
-        ax.legend(fontsize=8.5, frameon=False)
-    _prep_axes(ax, title, xlabel, ylabel)
-    _show(fig)
+    """Streamlit line chart (or filled area chart)."""
+    if title:
+        st.markdown(f"**{title}**")
+    fn = st.area_chart if fill else st.line_chart
+    _native(fn, data, height=height or CHART_H, x_label=xlabel or None, y_label=ylabel or None)
+
+
+def pie_chart(data, title=""):
+    """Donut chart drawn with Streamlit's built-in chart engine (Vega-Lite)."""
+    s = data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data
+    s = s[s > 0]
+    total = float(s.sum())
+    if total <= 0:
+        st.info("There is nothing to show in this chart yet.")
+        return
+    if len(s) > 6:
+        small = s[s / total < 0.03]
+        if len(small) > 1:
+            s = pd.concat([s[s / total >= 0.03], pd.Series({"Other": small.sum()})])
+    if title:
+        st.markdown(f"**{title}**")
+    chart_df = pd.DataFrame({"Part": [f"{k} ({100 * v / total:.0f}%)" for k, v in s.items()],
+                             "Value": [float(v) for v in s.values]})
+    spec = {
+        "mark": {"type": "arc", "innerRadius": 55, "outerRadius": 100},
+        "height": 230,
+        "encoding": {
+            "theta": {"field": "Value", "type": "quantitative", "stack": True},
+            "color": {"field": "Part", "type": "nominal", "sort": None,
+                      "scale": {"range": PIE_COLORS[: len(chart_df)]},
+                      "legend": {"orient": "right", "title": None}},
+            "tooltip": [{"field": "Part", "type": "nominal"},
+                        {"field": "Value", "type": "quantitative", "format": ".1f"}],
+        },
+    }
+    try:
+        st.vega_lite_chart(chart_df, spec, width="stretch")
+    except TypeError:
+        st.vega_lite_chart(chart_df, spec, use_container_width=True)
 
 
 # --------------------------------------- stretch-to-width helpers (any version) ---
@@ -547,36 +501,3 @@ def kpi_panel(items):
         cells.append(f'<div class="kpi"{title}><div class="kpi-l">{it["label"]}</div>'
                      f'<div class="kpi-v">{it["value"]}</div>{delta_html}</div>')
     st.markdown('<div class="kpi-panel">' + "".join(cells) + "</div>", unsafe_allow_html=True)
-
-
-# ------------------------------------------------------- pie / donut chart ---
-PIE_COLORS = ["#5aa886", "#6fa8dc", "#e0b66a", "#c98f8f", "#9b8fc9", "#7fc4c4", "#c9b38f", "#aab4a0"]
-
-
-def pie_chart(data, title=""):
-    """Donut chart of shares. Tiny slices are grouped into 'Other'."""
-    s = data.iloc[:, 0] if isinstance(data, pd.DataFrame) else data
-    s = s[s > 0]
-    total = float(s.sum())
-    if total <= 0:
-        st.info("There is nothing to show in this chart yet.")
-        return
-    if len(s) > 6:
-        small = s[s / total < 0.03]
-        if len(small) > 1:
-            s = pd.concat([s[s / total >= 0.03], pd.Series({"Other": small.sum()})])
-    labels = [f"{k} ({100 * v / total:.0f}%)" for k, v in s.items()]
-    fig, ax = plt.subplots(figsize=(FIG_W, 2.5))
-    wedges, _, autot = ax.pie(
-        s.values, startangle=90, counterclock=False, colors=PIE_COLORS[: len(s)],
-        autopct=lambda p: f"{p:.0f}%" if p >= 8 else "", pctdistance=0.78,
-        wedgeprops=dict(width=0.42, edgecolor="white", linewidth=1.5), textprops=dict(fontsize=8))
-    ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8.5, frameon=False)
-    ax.set_title(title, fontsize=11, loc="left", color="#1f2937", pad=6)
-    fig.subplots_adjust(left=0.02, right=0.60, top=0.88, bottom=0.04)
-    fig.set_dpi(110)
-    try:
-        st.pyplot(fig, width="content")
-    except TypeError:
-        st.pyplot(fig, use_container_width=False)
-    plt.close(fig)
